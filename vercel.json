@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://autocut-ai-video-be.onrender.com/api/:path*"
+    },
+    {
+      "source": "/storage/:path*",
+      "destination": "https://autocut-ai-video-be.onrender.com/storage/:path*"
+    },
+    {
+      "source": "/ws/:path*",
+      "destination": "https://autocut-ai-video-be.onrender.com/ws/:path*"
+    }
+  ]
+}
