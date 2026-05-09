@@ -7,14 +7,24 @@ import type {
   UploadResponse,
 } from '../types';
 
+const DEFAULT_PRODUCTION_API_BASE_URL = 'https://autocut-ai-video-be.onrender.com/api';
 const API_BASE = resolveApiBase();
 
 function resolveApiBase(): string {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
-  if (!configured) {
-    return '/api';
+  if (configured) {
+    return normalizeApiBase(configured);
   }
-  return configured.replace(/\/+$/, '');
+
+  if (import.meta.env.PROD) {
+    return DEFAULT_PRODUCTION_API_BASE_URL;
+  }
+
+  return '/api';
+}
+
+function normalizeApiBase(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, '');
 }
 
 function buildApiUrl(path: string): string {
