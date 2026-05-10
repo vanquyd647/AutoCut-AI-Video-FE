@@ -37,6 +37,17 @@ const MODEL_OPTIONS: ApiModelOption[] = [
   { value: 'gemma-4-26b-a4b', label: 'Gemma 4 26B A4B (Gemini API)' },
 ];
 
+function normalizeAnalyses(payload: unknown): VideoAnalysis[] {
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+
+  return payload.filter(
+    (item): item is VideoAnalysis =>
+      Boolean(item) && typeof item === 'object' && typeof (item as { video_name?: unknown }).video_name === 'string',
+  );
+}
+
 function loadHistory(): ProjectHistoryItem[] {
   try {
     const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
@@ -60,6 +71,7 @@ export default function App() {
   const [files, setFiles] = useState<File[]>([]);
   const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
   const [analyses, setAnalyses] = useState<VideoAnalysis[]>([]);
+  const [analysisCompleted, setAnalysisCompleted] = useState(false);
   const [editResult, setEditResult] = useState<EditResponse | null>(null);
   const [backendHealth, setBackendHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
@@ -70,7 +82,7 @@ export default function App() {
 
   const projectId = uploadResult?.project_id ?? null;
   const { progress, connected } = useWebSocket(projectId);
-  const currentStep = editResult ? 3 : analyses.length > 0 ? 2 : uploadResult ? 1 : 0;
+  const currentStep = editResult ? 3 : analysisCompleted ? 2 : uploadResult ? 1 : 0;
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, apiKey);
@@ -120,6 +132,7 @@ export default function App() {
       startTransition(() => {
         setUploadResult(result);
         setAnalyses([]);
+        setAnalysisCompleted(false);
         setEditResult(null);
         setHistory((previous) => {
           const next: ProjectHistoryItem = {
@@ -154,9 +167,11 @@ export default function App() {
           model: selectedModel,
         }),
       );
+      const nextAnalyses = normalizeAnalyses((result as { analyses?: unknown }).analyses);
       const now = new Date().toISOString();
       startTransition(() => {
-        setAnalyses(result.analyses);
+        setAnalyses(nextAnalyses);
+        setAnalysisCompleted(true);
         setEditResult(null);
         setHistory((previous) =>
           previous.map((item) =>
@@ -165,6 +180,7 @@ export default function App() {
         );
       });
     } catch (failure) {
+      setAnalysisCompleted(false);
       const message = failure instanceof Error ? failure.message : 'Analyze failed';
       const now = new Date().toISOString();
       setHistory((previous) =>
@@ -181,7 +197,7 @@ export default function App() {
       setError('Upload and analyze the project before rendering.');
       return;
     }
-    if (analyses.length === 0) {
+    if (!analysisCompleted) {
       setError('Analysis data is still missing. Run the analyze step first.');
       return;
     }
@@ -335,7 +351,7 @@ export default function App() {
                 type="button"
                 className="primary-button"
                 onClick={handleCreateEdit}
-                disabled={pending || !projectId || analyses.length === 0 || renderBlocked}
+                disabled={pending || !projectId || !analysisCompleted || renderBlocked}
               >
                 Render edit
               </button>
