@@ -16,7 +16,22 @@ const API_BASE = resolveApiBase();
 function resolveApiBase(): string {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
   if (configured) {
-    return normalizeApiBase(configured);
+    const normalized = normalizeApiBase(configured);
+
+    // In local dev, route loopback API targets through Vite proxy to avoid
+    // localhost vs 127.0.0.1 CORS mismatches.
+    if (!import.meta.env.PROD) {
+      try {
+        const configuredUrl = new URL(normalized);
+        if (configuredUrl.hostname === 'localhost' || configuredUrl.hostname === '127.0.0.1') {
+          return '/api';
+        }
+      } catch {
+        // Keep the configured value when it is not a valid absolute URL.
+      }
+    }
+
+    return normalized;
   }
 
   if (import.meta.env.PROD) {
