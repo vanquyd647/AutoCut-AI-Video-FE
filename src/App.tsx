@@ -5,13 +5,15 @@ import { EditPlanView } from './components/EditPlanView';
 import { ExportPanel } from './components/ExportPanel';
 import { HistoryPanel } from './components/HistoryPanel';
 import { ProgressBar } from './components/ProgressBar';
+import { SceneDetectionPanel } from './components/SceneDetectionPanel';
 import { StyleSelector } from './components/StyleSelector';
 import { Timeline } from './components/Timeline';
+import { TranscriptionPanel } from './components/TranscriptionPanel';
 import { UploadZone } from './components/UploadZone';
 import { VideoPreview } from './components/VideoPreview';
 import { useApiAction } from './hooks/useApi';
 import { useWebSocket } from './hooks/useWebSocket';
-import { analyzeProject, createEdit, createManualEdit, getHealthStatus, uploadVideos } from './services/api';
+import { analyzeProject, createEdit, createManualEdit, detectScenes, getHealthStatus, transcribeVideo, uploadVideos } from './services/api';
 import type {
   ApiModelOption,
   AspectRatio,
@@ -19,7 +21,9 @@ import type {
   EditResponse,
   HealthResponse,
   ProjectHistoryItem,
+  SceneDetectionResponse,
   StyleKey,
+  TranscriptionResponse,
   UploadResponse,
   VideoAnalysis,
 } from './types';
@@ -92,6 +96,9 @@ export default function App() {
   const [style, setStyle] = useState<StyleKey>('tiktok');
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('9:16');
   const [targetDuration, setTargetDuration] = useState(30);
+  const [sceneDetectionResult, setSceneDetectionResult] = useState<SceneDetectionResponse | null>(null);
+  const [transcriptions, setTranscriptions] = useState<Record<string, TranscriptionResponse>>({});
+  const [transcribingVideos, setTranscribingVideos] = useState<Set<string>>(new Set());
   const { execute, pending, error, setError } = useApiAction();
 
   const projectId = uploadResult?.project_id ?? null;
@@ -203,6 +210,49 @@ export default function App() {
         ),
       );
       return;
+    }
+  }
+
+  async function handleDetectScenes() {
+    if (!projectId) {
+      setError('Upload the source clips before detecting scenes.');
+      return;
+    }
+
+    try {
+      const result = await execute(() => detectScenes(projectId));
+      startTransition(() => {
+        setSceneDetectionResult(result);
+      });
+    } catch {
+      return;
+    }
+  }
+
+  async function handleTranscribeVideo(videoName: string) {
+    if (!projectId) {
+      setError('Upload the source clips before transcribing.');
+      return;
+    }
+
+    setTranscribingVideos((prev) => new Set([...prev, videoName]));
+
+    try {
+      const result = await execute(() => transcribeVideo(projectId, videoName));
+      startTransition(() => {
+        setTranscriptions((previous) => ({
+          ...previous,
+          [videoName]: result,
+        }));
+      });
+    } catch {
+      return;
+    } finally {
+      setTranscribingVideos((prev) => {
+        const next = new Set(prev);
+        next.delete(videoName);
+        return next;
+      });
     }
   }
 
@@ -493,6 +543,11 @@ export default function App() {
                 Render reordered timeline
               </button>
             ) : null}
+            {projectId && !sceneDetectionResult ? (
+              <button type="button" className="secondary-button" onClick={handleDetectScenes} disabled={pending}>
+                Detect scenes
+              </button>
+            ) : null}
             {error ? <div className="error-banner">{error}</div> : null}
           </section>
 
@@ -520,11 +575,19 @@ export default function App() {
             </div>
           </section>
 
-          <VideoPreview files={files} videos={uploadResult?.videos ?? []} analyses={analyses} />
+          <VideoPreview 
+            files={files} 
+            videos={uploadResult?.videos ?? []} 
+            analyses={analyses}
+            onTranscribe={handleTranscribeVideo}
+            transcribingVideos={transcribingVideos}
+          />
           <Timeline plan={editResult?.plan ?? null} onMoveClip={handleMoveClip} />
         </section>
 
         <section className="panel side-panel">
+          <SceneDetectionPanel scenes={sceneDetectionResult} loading={pending && !sceneDetectionResult} />
+          <TranscriptionPanel transcriptions={transcriptions} />
           <EditPlanView plan={editResult?.plan ?? null} />
           <ExportPanel outputUrl={editResult?.output_video_url ?? null} projectId={projectId} />
           <HistoryPanel items={history} models={MODEL_OPTIONS} />

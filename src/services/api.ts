@@ -6,6 +6,8 @@ import type {
   HealthResponse,
   ManualEditRequest,
   UploadResponse,
+  SceneDetectionResponse,
+  TranscriptionResponse,
 } from '../types';
 
 const DEFAULT_PRODUCTION_API_BASE_URL = 'https://autocut-ai-video-be.onrender.com/api';
@@ -123,4 +125,17 @@ export function getExportUrl(projectId: string): string {
 export function connectProgress(projectId: string): WebSocket {
   const wsUrl = `${resolveWebSocketBaseUrl()}/ws/progress/${projectId}`;
   return new WebSocket(wsUrl);
+}
+
+export function detectScenes(projectId: string): Promise<SceneDetectionResponse> {
+  return requestJson<SceneDetectionResponse>(`/scenes/detect/${projectId}`, {
+    method: 'POST',
+  });
+}
+
+export function transcribeVideo(projectId: string, videoName: string, language?: string): Promise<TranscriptionResponse> {
+  const params = language ? `?language=${encodeURIComponent(language)}` : '';
+  return requestJson<TranscriptionResponse>(`/transcribe/${projectId}/${encodeURIComponent(videoName)}${params}`, {
+    method: 'POST',
+  });
 }

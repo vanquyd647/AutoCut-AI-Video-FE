@@ -6,9 +6,11 @@ interface VideoPreviewProps {
   files: File[];
   videos: VideoInfo[];
   analyses: VideoAnalysis[];
+  onTranscribe?: (videoName: string) => void;
+  transcribingVideos?: Set<string>;
 }
 
-export function VideoPreview({ files, videos, analyses }: VideoPreviewProps) {
+export function VideoPreview({ files, videos, analyses, onTranscribe, transcribingVideos }: VideoPreviewProps) {
   const [previews, setPreviews] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -33,6 +35,7 @@ export function VideoPreview({ files, videos, analyses }: VideoPreviewProps) {
         {videos.map((video) => {
           const analysis = analyses.find((item) => item.video_name === video.name);
           const previewUrl = previews[video.name];
+          const isTranscribing = transcribingVideos?.has(video.name) ?? false;
           return (
             <article key={video.stored_name} className="preview-card">
               <div className="preview-media-frame">
@@ -55,6 +58,16 @@ export function VideoPreview({ files, videos, analyses }: VideoPreviewProps) {
                 </div>
               ) : (
                 <p className="placeholder-copy">Run analyze to generate scene tags, pacing hints, and cut suggestions.</p>
+              )}
+              {onTranscribe && (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => onTranscribe(video.name)}
+                  disabled={isTranscribing}
+                >
+                  {isTranscribing ? 'Transcribing...' : 'Transcribe audio'}
+                </button>
               )}
             </article>
           );

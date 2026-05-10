@@ -148,3 +148,42 @@ export interface ProjectHistoryItem {
   output_video_url?: string;
   error?: string;
 }
+
+export interface SceneBoundary {
+  timecode: string;
+  timestamp_ms: number;
+  frame_number: number;
+}
+
+export interface SceneDetectionResult {
+  video_name: string;
+  stored_name: string;
+  scenes: SceneBoundary[];
+  scene_count: number;
+}
+
+export interface SceneDetectionResponse {
+  project_id: string;
+  scenes: Record<string, SceneDetectionResult>;
+  total_videos: number;
+}
+
+export interface TranscriptionSegment {
+  id: number;
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface TranscriptionResult {
+  text: string;
+  language: string;
+  segments: TranscriptionSegment[];
+  duration: number;
+}
+
+export interface TranscriptionResponse {
+  project_id: string;
+  video_name: string;
+  transcription: TranscriptionResult;
+}
