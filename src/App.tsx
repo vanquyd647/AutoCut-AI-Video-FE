@@ -11,10 +11,11 @@ import { UploadZone } from './components/UploadZone';
 import { VideoPreview } from './components/VideoPreview';
 import { useApiAction } from './hooks/useApi';
 import { useWebSocket } from './hooks/useWebSocket';
-import { analyzeProject, createEdit, getHealthStatus, uploadVideos } from './services/api';
+import { analyzeProject, createEdit, createManualEdit, getHealthStatus, uploadVideos } from './services/api';
 import type {
   ApiModelOption,
   AspectRatio,
+  ClipSegment,
   EditResponse,
   HealthResponse,
   ProjectHistoryItem,
@@ -24,6 +25,9 @@ import type {
 } from './types';
 
 const STORAGE_KEY = 'autocut-gemini-api-key';
+function buildClipIdentity(clip: ClipSegment, index: number): string {
+  return `${index}::${clip.source_video}::${clip.start}::${clip.end}::${clip.rationale}`;
+}
 const MODEL_STORAGE_KEY = 'autocut-gemini-model';
 const HISTORY_STORAGE_KEY = 'autocut-project-history-v1';
 
@@ -36,6 +40,16 @@ const MODEL_OPTIONS: ApiModelOption[] = [
   { value: 'gemma-4-31b', label: 'Gemma 4 31B (Gemini API)' },
   { value: 'gemma-4-26b-a4b', label: 'Gemma 4 26B A4B (Gemini API)' },
 ];
+
+function moveItem<T>(items: T[], fromIndex: number, toIndex: number): T[] {
+  const next = [...items];
+  const [moved] = next.splice(fromIndex, 1);
+  if (moved === undefined) {
+    return items;
+  }
+  next.splice(toIndex, 0, moved);
+  return next;
+}
 
 function normalizeAnalyses(payload: unknown): VideoAnalysis[] {
   if (!Array.isArray(payload)) {
@@ -246,6 +260,93 @@ export default function App() {
     }
   }
 
+  function handleMoveClip(fromIndex: number, toIndex: number) {
+    setEditResult((previous) => {
+      if (!previous) {
+        return previous;
+      }
+
+      const clipCount = previous.plan.clips.length;
+      if (
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= clipCount ||
+        toIndex >= clipCount ||
+        fromIndex === toIndex
+      ) {
+        return previous;
+      }
+
+      const originalIdentity = previous.plan.clips.map((clip, index) => buildClipIdentity(clip, index));
+      const movedClips = moveItem(previous.plan.clips, fromIndex, toIndex).map((clip, index) => ({
+        ...clip,
+        order: index,
+      }));
+      const movedIdentity = movedClips.map((clip, index) => buildClipIdentity(clip, index));
+      const oldToNewIndex = new Map<number, number>();
+
+      originalIdentity.forEach((identity, oldIndex) => {
+        const newIndex = movedIdentity.indexOf(identity);
+        if (newIndex >= 0) {
+          oldToNewIndex.set(oldIndex, newIndex);
+        }
+      });
+
+      const remapIndex = (value: number) => oldToNewIndex.get(value) ?? value;
+
+      return {
+        ...previous,
+        plan: {
+          ...previous.plan,
+          clips: movedClips,
+          transitions: previous.plan.transitions.map((transition) => ({
+            ...transition,
+            at_clip_index: remapIndex(transition.at_clip_index),
+          })),
+          speed_effects: previous.plan.speed_effects.map((effect) => ({
+            ...effect,
+            clip_index: remapIndex(effect.clip_index),
+          })),
+        },
+      };
+    });
+  }
+
+  async function handleRenderManualTimeline() {
+    if (!projectId || !editResult) {
+      setError('Create an edit plan before rendering a manual timeline.');
+      return;
+    }
+
+    try {
+      const result = await execute(() =>
+        createManualEdit({
+          project_id: projectId,
+          plan: editResult.plan,
+        }),
+      );
+      const now = new Date().toISOString();
+      startTransition(() => {
+        setEditResult(result);
+        setHistory((previous) =>
+          previous.map((item) =>
+            item.project_id === projectId
+              ? {
+                  ...item,
+                  status: 'rendered',
+                  output_video_url: result.output_video_url,
+                  updated_at: now,
+                  error: undefined,
+                }
+              : item,
+          ),
+        );
+      });
+    } catch {
+      return;
+    }
+  }
+
   function handleStyleSelect(nextStyle: StyleKey, nextAspectRatio: AspectRatio, nextDuration: number) {
     setStyle(nextStyle);
     setAspectRatio(nextAspectRatio);
@@ -253,6 +354,28 @@ export default function App() {
   }
 
   const renderBlocked = backendHealth !== null && !backendHealth.ffmpeg_available;
+  const heroCapabilities = [
+    {
+      label: 'Backend',
+      value: backendHealth?.status === 'ok' ? 'Online' : 'Starting',
+      detail: renderBlocked ? 'FFmpeg missing' : backendHealth?.gemini_model ?? 'Ready',
+    },
+    {
+      label: 'Progress',
+      value: connected ? 'Live WS' : 'Idle',
+      detail: progress?.stage ?? 'Waiting',
+    },
+    {
+      label: 'History',
+      value: `${history.length}`,
+      detail: history.length === 1 ? 'Saved project' : 'Saved projects',
+    },
+    {
+      label: 'Timeline',
+      value: editResult ? 'Editable' : 'Ready',
+      detail: editResult ? 'Drag clips to reorder' : 'Analyze to unlock',
+    },
+  ];
 
   return (
     <div className="app-shell">
@@ -267,6 +390,15 @@ export default function App() {
             Upload raw footage, let the backend analyze scene rhythm, then render an edit plan tuned for
             TikTok, YouTube, or Instagram.
           </p>
+          <div className="hero-capabilities">
+            {heroCapabilities.map((item) => (
+              <article key={item.label} className="hero-capability">
+                <span>{item.label}</span>
+                <strong>{item.value}</strong>
+                <small>{item.detail}</small>
+              </article>
+            ))}
+          </div>
         </div>
         <div className="hero-metrics">
           <article>
@@ -356,6 +488,11 @@ export default function App() {
                 Render edit
               </button>
             </div>
+            {editResult ? (
+              <button type="button" className="secondary-button" onClick={handleRenderManualTimeline} disabled={pending || renderBlocked}>
+                Render reordered timeline
+              </button>
+            ) : null}
             {error ? <div className="error-banner">{error}</div> : null}
           </section>
 
@@ -384,7 +521,7 @@ export default function App() {
           </section>
 
           <VideoPreview files={files} videos={uploadResult?.videos ?? []} analyses={analyses} />
-          <Timeline plan={editResult?.plan ?? null} />
+          <Timeline plan={editResult?.plan ?? null} onMoveClip={handleMoveClip} />
         </section>
 
         <section className="panel side-panel">

@@ -4,6 +4,7 @@ import type {
   EditRequest,
   EditResponse,
   HealthResponse,
+  ManualEditRequest,
   UploadResponse,
 } from '../types';
 
@@ -103,6 +104,13 @@ export function analyzeProject(payload: AnalyzeRequest): Promise<AnalyzeResponse
 
 export function createEdit(payload: EditRequest): Promise<EditResponse> {
   return requestJson<EditResponse>('/edit', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createManualEdit(payload: ManualEditRequest): Promise<EditResponse> {
+  return requestJson<EditResponse>('/edit/manual', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

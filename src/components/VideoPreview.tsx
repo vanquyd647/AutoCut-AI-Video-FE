@@ -35,10 +35,17 @@ export function VideoPreview({ files, videos, analyses }: VideoPreviewProps) {
           const previewUrl = previews[video.name];
           return (
             <article key={video.stored_name} className="preview-card">
-              {previewUrl ? <video src={previewUrl} controls muted playsInline /> : <div className="preview-placeholder" />}
+              <div className="preview-media-frame">
+                {previewUrl ? <video src={previewUrl} controls muted playsInline /> : <div className="preview-placeholder" />}
+              </div>
               <div className="preview-meta">
                 <h3>{video.name}</h3>
                 <span>{Math.max(video.size_bytes / 1024 / 1024, 0.1).toFixed(1)} MB</span>
+              </div>
+              <div className="preview-badges">
+                <span className="chip">{analysis ? 'Analyzed' : 'Pending analysis'}</span>
+                {video.duration_seconds ? <span className="chip">{video.duration_seconds.toFixed(1)}s</span> : null}
+                {video.width && video.height ? <span className="chip">{video.width}×{video.height}</span> : null}
               </div>
               {analysis ? (
                 <div className="analysis-chip-grid">
@@ -47,7 +54,7 @@ export function VideoPreview({ files, videos, analyses }: VideoPreviewProps) {
                   <span>{analysis.color_mood}</span>
                 </div>
               ) : (
-                <p className="placeholder-copy">Run analyze to generate scene tags and cut hints.</p>
+                <p className="placeholder-copy">Run analyze to generate scene tags, pacing hints, and cut suggestions.</p>
               )}
             </article>
           );

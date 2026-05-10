@@ -106,6 +106,11 @@ export interface EditRequest {
   model?: string;
 }
 
+export interface ManualEditRequest {
+  project_id: string;
+  plan: EditPlan;
+}
+
 export interface EditResponse {
   plan: EditPlan;
   output_video_url: string;

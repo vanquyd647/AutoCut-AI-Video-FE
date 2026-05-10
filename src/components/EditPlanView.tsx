@@ -18,14 +18,15 @@ export function EditPlanView({ plan }: EditPlanViewProps) {
           <article className="info-card">
             <span className="info-label">Music suggestion</span>
             <strong>{plan.music_suggestion}</strong>
+            <p className="card-supporting-copy">The editor uses this as a pacing anchor for the rendered cut.</p>
           </article>
           <article className="info-card">
             <span className="info-label">Transitions</span>
             <div className="tag-row">
-              {plan.transitions.length === 0 ? <span>No transitions</span> : null}
+              {plan.transitions.length === 0 ? <span className="placeholder-copy">No transitions</span> : null}
               {plan.transitions.map((transition) => (
                 <span key={`${transition.at_clip_index}-${transition.type}`} className="chip">
-                  {transition.type}
+                  {transition.type} · {transition.duration.toFixed(1)}s
                 </span>
               ))}
             </div>
@@ -33,7 +34,7 @@ export function EditPlanView({ plan }: EditPlanViewProps) {
           <article className="info-card">
             <span className="info-label">Text overlays</span>
             <div className="tag-row">
-              {plan.text_overlays.length === 0 ? <span>No overlays</span> : null}
+              {plan.text_overlays.length === 0 ? <span className="placeholder-copy">No overlays</span> : null}
               {plan.text_overlays.map((overlay) => (
                 <span key={`${overlay.text}-${overlay.start}`} className="chip">
                   {overlay.text}
@@ -44,9 +45,16 @@ export function EditPlanView({ plan }: EditPlanViewProps) {
           <article className="info-card">
             <span className="info-label">Clip rationale</span>
             <div className="stack-list compact-list">
-              {plan.clips.map((clip) => (
-                <div key={`${clip.source_video}-${clip.order}`} className="micro-row">
-                  <strong>{clip.source_video}</strong>
+              {plan.clips.map((clip, index) => (
+                <div key={`${clip.source_video}-${clip.order}-${index}`} className="micro-row micro-row-card">
+                  <div>
+                    <strong>
+                      #{index + 1} {clip.source_video}
+                    </strong>
+                    <span>
+                      {clip.start.toFixed(1)}s - {clip.end.toFixed(1)}s
+                    </span>
+                  </div>
                   <span>{clip.rationale}</span>
                 </div>
               ))}
