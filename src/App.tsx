@@ -18,6 +18,7 @@ import type {
   ApiModelOption,
   AspectRatio,
   ClipSegment,
+  EditPlan,
   EditResponse,
   HealthResponse,
   ProjectHistoryItem,
@@ -82,6 +83,138 @@ function loadHistory(): ProjectHistoryItem[] {
   }
 }
 
+function normalizeSnippet(text: string, maxLength = 72): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return '';
+  }
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+  return `${compact.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function buildSceneDrivenPlan(
+  videos: UploadResponse['videos'],
+  sceneDetectionResult: SceneDetectionResponse,
+  transcriptions: Record<string, TranscriptionResponse>,
+  style: StyleKey,
+  aspectRatio: AspectRatio,
+  targetDuration: number,
+): EditPlan | null {
+  const discoveredClips: ClipSegment[] = [];
+
+  for (const video of videos) {
+    const sceneResult = sceneDetectionResult.scenes[video.stored_name];
+    if (!sceneResult || sceneResult.scenes.length === 0) {
+      continue;
+    }
+
+    const starts = Array.from(
+      new Set(sceneResult.scenes.map((scene) => Math.max(0, scene.timestamp_ms / 1000))),
+    ).sort((a, b) => a - b);
+
+    if (starts.length === 0 || starts[0] > 0.05) {
+      starts.unshift(0);
+    }
+
+    const videoDuration = Math.max(video.duration_seconds ?? 0, starts[starts.length - 1] ?? 0, 1);
+    const transcriptSegments = transcriptions[video.name]?.transcription.segments ?? [];
+
+    for (let index = 0; index < starts.length; index += 1) {
+      const start = starts[index];
+      const rawEnd = starts[index + 1] ?? videoDuration;
+      const end = Math.min(videoDuration, Math.max(start + 0.35, rawEnd));
+      if (end - start < 0.35) {
+        continue;
+      }
+
+      const speechMatch = transcriptSegments.find(
+        (segment) => segment.start < end && segment.end > start && segment.text.trim().length > 0,
+      );
+      const rationale = speechMatch
+        ? `Scene + speech: "${normalizeSnippet(speechMatch.text)}"`
+        : `Scene boundary at ${start.toFixed(1)}s`;
+
+      discoveredClips.push({
+        source_video: video.name,
+        start,
+        end,
+        order: discoveredClips.length,
+        rationale,
+      });
+    }
+  }
+
+  if (discoveredClips.length === 0) {
+    return null;
+  }
+
+  const normalizedClips: ClipSegment[] = [];
+  let remaining = Math.max(6, targetDuration);
+
+  for (const clip of discoveredClips) {
+    if (remaining <= 0.01) {
+      break;
+    }
+
+    const duration = clip.end - clip.start;
+    if (duration <= remaining + 0.1) {
+      normalizedClips.push({ ...clip, order: normalizedClips.length });
+      remaining -= duration;
+      continue;
+    }
+
+    const trimmedDuration = Math.max(0.8, remaining);
+    normalizedClips.push({
+      ...clip,
+      end: clip.start + trimmedDuration,
+      order: normalizedClips.length,
+      rationale: `${clip.rationale} (trimmed to fit target)`,
+    });
+    remaining = 0;
+  }
+
+  if (normalizedClips.length === 0) {
+    const first = discoveredClips[0];
+    normalizedClips.push({
+      ...first,
+      end: Math.min(first.end, first.start + Math.max(1, targetDuration)),
+      order: 0,
+    });
+  }
+
+  const transitions = normalizedClips.slice(0, -1).map((_, index) => ({
+    at_clip_index: index,
+    type: index % 2 === 0 ? 'cut' : 'cross_dissolve',
+    duration: index % 2 === 0 ? 0.12 : 0.24,
+  }));
+
+  const overlays = Object.values(transcriptions)
+    .flatMap((entry) => entry.transcription.segments)
+    .filter((segment) => segment.text.trim().length > 0)
+    .slice(0, 2)
+    .map((segment, index) => ({
+      text: normalizeSnippet(segment.text, 40),
+      start: Math.max(0, index * 3),
+      end: Math.max(1.5, index * 3 + 2.5),
+      position: 'bottom-center',
+      animation: 'fade',
+    }));
+
+  return {
+    style,
+    aspect_ratio: aspectRatio,
+    target_duration: targetDuration,
+    clips: normalizedClips,
+    transitions,
+    text_overlays: overlays,
+    color_grading: [{ preset: 'vibrant' }],
+    speed_effects: [],
+    music_suggestion: 'Scene-driven pacing based on cut boundaries and transcript timing',
+  };
+}
+
 export default function App() {
   const [apiKey, setApiKey] = useState(() => window.localStorage.getItem(STORAGE_KEY) ?? '');
   const [selectedModel, setSelectedModel] = useState(() => window.localStorage.getItem(MODEL_STORAGE_KEY) ?? MODEL_OPTIONS[0].value);
@@ -99,11 +232,13 @@ export default function App() {
   const [sceneDetectionResult, setSceneDetectionResult] = useState<SceneDetectionResponse | null>(null);
   const [transcriptions, setTranscriptions] = useState<Record<string, TranscriptionResponse>>({});
   const [transcribingVideos, setTranscribingVideos] = useState<Set<string>>(new Set());
+  const [draftPlan, setDraftPlan] = useState<EditPlan | null>(null);
   const { execute, pending, error, setError } = useApiAction();
 
   const projectId = uploadResult?.project_id ?? null;
   const { progress, connected } = useWebSocket(projectId);
-  const currentStep = editResult ? 3 : analysisCompleted ? 2 : uploadResult ? 1 : 0;
+  const activePlan = editResult?.plan ?? draftPlan;
+  const currentStep = editResult ? 3 : activePlan || analysisCompleted ? 2 : uploadResult ? 1 : 0;
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, apiKey);
@@ -155,6 +290,10 @@ export default function App() {
         setAnalyses([]);
         setAnalysisCompleted(false);
         setEditResult(null);
+        setDraftPlan(null);
+        setSceneDetectionResult(null);
+        setTranscriptions({});
+        setTranscribingVideos(new Set());
         setHistory((previous) => {
           const next: ProjectHistoryItem = {
             id: result.project_id,
@@ -172,6 +311,33 @@ export default function App() {
     } catch {
       return;
     }
+  }
+
+  function handleBuildTimelineFromScenes() {
+    if (!uploadResult || !sceneDetectionResult) {
+      setError('Upload clips and run scene detection before building a scene-driven timeline.');
+      return;
+    }
+
+    const generatedPlan = buildSceneDrivenPlan(
+      uploadResult.videos,
+      sceneDetectionResult,
+      transcriptions,
+      style,
+      aspectRatio,
+      targetDuration,
+    );
+
+    if (!generatedPlan) {
+      setError('No usable scene boundaries were detected. Try another clip or run Analyze project.');
+      return;
+    }
+
+    startTransition(() => {
+      setDraftPlan(generatedPlan);
+      setEditResult(null);
+      setError(null);
+    });
   }
 
   async function handleAnalyze() {
@@ -311,12 +477,8 @@ export default function App() {
   }
 
   function handleMoveClip(fromIndex: number, toIndex: number) {
-    setEditResult((previous) => {
-      if (!previous) {
-        return previous;
-      }
-
-      const clipCount = previous.plan.clips.length;
+    const remapPlan = (plan: EditPlan): EditPlan => {
+      const clipCount = plan.clips.length;
       if (
         fromIndex < 0 ||
         toIndex < 0 ||
@@ -324,11 +486,11 @@ export default function App() {
         toIndex >= clipCount ||
         fromIndex === toIndex
       ) {
-        return previous;
+        return plan;
       }
 
-      const originalIdentity = previous.plan.clips.map((clip, index) => buildClipIdentity(clip, index));
-      const movedClips = moveItem(previous.plan.clips, fromIndex, toIndex).map((clip, index) => ({
+      const originalIdentity = plan.clips.map((clip, index) => buildClipIdentity(clip, index));
+      const movedClips = moveItem(plan.clips, fromIndex, toIndex).map((clip, index) => ({
         ...clip,
         order: index,
       }));
@@ -345,25 +507,37 @@ export default function App() {
       const remapIndex = (value: number) => oldToNewIndex.get(value) ?? value;
 
       return {
-        ...previous,
-        plan: {
-          ...previous.plan,
-          clips: movedClips,
-          transitions: previous.plan.transitions.map((transition) => ({
-            ...transition,
-            at_clip_index: remapIndex(transition.at_clip_index),
-          })),
-          speed_effects: previous.plan.speed_effects.map((effect) => ({
-            ...effect,
-            clip_index: remapIndex(effect.clip_index),
-          })),
-        },
+        ...plan,
+        clips: movedClips,
+        transitions: plan.transitions.map((transition) => ({
+          ...transition,
+          at_clip_index: remapIndex(transition.at_clip_index),
+        })),
+        speed_effects: plan.speed_effects.map((effect) => ({
+          ...effect,
+          clip_index: remapIndex(effect.clip_index),
+        })),
       };
-    });
+    };
+
+    if (editResult) {
+      setEditResult((previous) => {
+        if (!previous) {
+          return previous;
+        }
+        return {
+          ...previous,
+          plan: remapPlan(previous.plan),
+        };
+      });
+      return;
+    }
+
+    setDraftPlan((previous) => (previous ? remapPlan(previous) : previous));
   }
 
   async function handleRenderManualTimeline() {
-    if (!projectId || !editResult) {
+    if (!projectId || !activePlan) {
       setError('Create an edit plan before rendering a manual timeline.');
       return;
     }
@@ -372,12 +546,13 @@ export default function App() {
       const result = await execute(() =>
         createManualEdit({
           project_id: projectId,
-          plan: editResult.plan,
+          plan: activePlan,
         }),
       );
       const now = new Date().toISOString();
       startTransition(() => {
         setEditResult(result);
+        setDraftPlan(null);
         setHistory((previous) =>
           previous.map((item) =>
             item.project_id === projectId
@@ -422,8 +597,8 @@ export default function App() {
     },
     {
       label: 'Timeline',
-      value: editResult ? 'Editable' : 'Ready',
-      detail: editResult ? 'Drag clips to reorder' : 'Analyze to unlock',
+      value: activePlan ? 'Editable' : 'Ready',
+      detail: activePlan ? 'Drag clips to reorder' : 'Analyze to unlock',
     },
   ];
 
@@ -538,14 +713,19 @@ export default function App() {
                 Render edit
               </button>
             </div>
-            {editResult ? (
+            {activePlan ? (
               <button type="button" className="secondary-button" onClick={handleRenderManualTimeline} disabled={pending || renderBlocked}>
-                Render reordered timeline
+                {editResult ? 'Render reordered timeline' : 'Render scene-based timeline'}
               </button>
             ) : null}
             {projectId && !sceneDetectionResult ? (
               <button type="button" className="secondary-button" onClick={handleDetectScenes} disabled={pending}>
                 Detect scenes
+              </button>
+            ) : null}
+            {projectId && sceneDetectionResult ? (
+              <button type="button" className="secondary-button" onClick={handleBuildTimelineFromScenes} disabled={pending}>
+                {draftPlan ? 'Rebuild timeline from scenes' : 'Build timeline from scenes'}
               </button>
             ) : null}
             {error ? <div className="error-banner">{error}</div> : null}
@@ -582,13 +762,13 @@ export default function App() {
             onTranscribe={handleTranscribeVideo}
             transcribingVideos={transcribingVideos}
           />
-          <Timeline plan={editResult?.plan ?? null} onMoveClip={handleMoveClip} />
+          <Timeline plan={activePlan ?? null} onMoveClip={handleMoveClip} />
         </section>
 
         <section className="panel side-panel">
           <SceneDetectionPanel scenes={sceneDetectionResult} loading={pending && !sceneDetectionResult} />
           <TranscriptionPanel transcriptions={transcriptions} />
-          <EditPlanView plan={editResult?.plan ?? null} />
+          <EditPlanView plan={activePlan ?? null} />
           <ExportPanel outputUrl={editResult?.output_video_url ?? null} projectId={projectId} />
           <HistoryPanel items={history} models={MODEL_OPTIONS} />
         </section>
