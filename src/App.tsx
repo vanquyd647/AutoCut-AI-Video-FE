@@ -94,6 +94,76 @@ function normalizeSnippet(text: string, maxLength = 72): string {
   return `${compact.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+interface StyleTimelineConfig {
+  preferredClipSeconds: number;
+  minClipSeconds: number;
+  maxClipSeconds: number;
+  transitionCycle: Array<{ type: string; duration: number }>;
+  overlayAnimation: 'fade' | 'typewriter' | 'slide_up';
+  musicSuggestion: string;
+  speechWeight: number;
+  earlyWeight: number;
+}
+
+interface CandidateSceneClip extends ClipSegment {
+  duration: number;
+  score: number;
+}
+
+const STYLE_TIMELINE_CONFIG: Record<StyleKey, StyleTimelineConfig> = {
+  tiktok: {
+    preferredClipSeconds: 1.6,
+    minClipSeconds: 0.7,
+    maxClipSeconds: 3.2,
+    transitionCycle: [
+      { type: 'cut', duration: 0.08 },
+      { type: 'slide_left', duration: 0.18 },
+      { type: 'cut', duration: 0.1 },
+      { type: 'zoom_in', duration: 0.16 },
+    ],
+    overlayAnimation: 'typewriter',
+    musicSuggestion: 'Fast punchy beat with strong drops for hook-first pacing',
+    speechWeight: 4.2,
+    earlyWeight: 1.8,
+  },
+  youtube: {
+    preferredClipSeconds: 3.5,
+    minClipSeconds: 1.4,
+    maxClipSeconds: 6,
+    transitionCycle: [
+      { type: 'cross_dissolve', duration: 0.34 },
+      { type: 'fade', duration: 0.28 },
+      { type: 'cross_dissolve', duration: 0.3 },
+    ],
+    overlayAnimation: 'fade',
+    musicSuggestion: 'Steady cinematic groove with room for dialogue moments',
+    speechWeight: 3.4,
+    earlyWeight: 0.8,
+  },
+  instagram: {
+    preferredClipSeconds: 2.4,
+    minClipSeconds: 0.9,
+    maxClipSeconds: 4,
+    transitionCycle: [
+      { type: 'fade', duration: 0.2 },
+      { type: 'slide_right', duration: 0.22 },
+      { type: 'cross_dissolve', duration: 0.24 },
+    ],
+    overlayAnimation: 'slide_up',
+    musicSuggestion: 'Polished lifestyle beat with smooth accents between looks',
+    speechWeight: 3.8,
+    earlyWeight: 1.2,
+  },
+};
+
+function overlapDuration(aStart: number, aEnd: number, bStart: number, bEnd: number): number {
+  return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+}
+
+function candidateKey(clip: CandidateSceneClip): string {
+  return `${clip.source_video}::${clip.start.toFixed(3)}::${clip.end.toFixed(3)}`;
+}
+
 function buildSceneDrivenPlan(
   videos: UploadResponse['videos'],
   sceneDetectionResult: SceneDetectionResponse,
@@ -102,7 +172,8 @@ function buildSceneDrivenPlan(
   aspectRatio: AspectRatio,
   targetDuration: number,
 ): EditPlan | null {
-  const discoveredClips: ClipSegment[] = [];
+  const config = STYLE_TIMELINE_CONFIG[style];
+  const discoveredClips: CandidateSceneClip[] = [];
 
   for (const video of videos) {
     const sceneResult = sceneDetectionResult.scenes[video.stored_name];
@@ -119,28 +190,47 @@ function buildSceneDrivenPlan(
     }
 
     const videoDuration = Math.max(video.duration_seconds ?? 0, starts[starts.length - 1] ?? 0, 1);
+    if (starts[starts.length - 1] < videoDuration - 0.05) {
+      starts.push(videoDuration);
+    }
     const transcriptSegments = transcriptions[video.name]?.transcription.segments ?? [];
 
-    for (let index = 0; index < starts.length; index += 1) {
+    for (let index = 0; index < starts.length - 1; index += 1) {
       const start = starts[index];
       const rawEnd = starts[index + 1] ?? videoDuration;
       const end = Math.min(videoDuration, Math.max(start + 0.35, rawEnd));
-      if (end - start < 0.35) {
+      const duration = end - start;
+      if (duration < 0.35) {
         continue;
       }
 
-      const speechMatch = transcriptSegments.find(
-        (segment) => segment.start < end && segment.end > start && segment.text.trim().length > 0,
+      const overlappingSpeech = transcriptSegments.filter(
+        (segment) => overlapDuration(start, end, segment.start, segment.end) > 0 && segment.text.trim().length > 0,
       );
-      const rationale = speechMatch
-        ? `Scene + speech: "${normalizeSnippet(speechMatch.text)}"`
+
+      const speechSeconds = overlappingSpeech.reduce(
+        (sum, segment) => sum + overlapDuration(start, end, segment.start, segment.end),
+        0,
+      );
+      const speechDensity = duration > 0 ? speechSeconds / duration : 0;
+      const speechSnippet = normalizeSnippet(overlappingSpeech[0]?.text ?? '', 56);
+
+      const positionRatio = videoDuration > 0 ? start / videoDuration : 0;
+      const earlyPriority = 1 - Math.min(1, Math.max(0, positionRatio));
+      const lengthBias = Math.min(duration, config.maxClipSeconds) / Math.max(config.maxClipSeconds, 0.01);
+      const score = speechDensity * config.speechWeight + earlyPriority * config.earlyWeight + lengthBias * 0.65 + (speechSnippet ? 0.9 : 0);
+
+      const rationale = speechSnippet
+        ? `Scene + speech: "${speechSnippet}"`
         : `Scene boundary at ${start.toFixed(1)}s`;
 
       discoveredClips.push({
         source_video: video.name,
         start,
         end,
-        order: discoveredClips.length,
+        duration,
+        score,
+        order: 0,
         rationale,
       });
     }
@@ -150,68 +240,173 @@ function buildSceneDrivenPlan(
     return null;
   }
 
-  const normalizedClips: ClipSegment[] = [];
-  let remaining = Math.max(6, targetDuration);
+  const targetSeconds = Math.max(6, targetDuration);
 
+  const byVideo = new Map<string, CandidateSceneClip[]>();
   for (const clip of discoveredClips) {
+    const bucket = byVideo.get(clip.source_video);
+    if (bucket) {
+      bucket.push(clip);
+    } else {
+      byVideo.set(clip.source_video, [clip]);
+    }
+  }
+  for (const bucket of byVideo.values()) {
+    bucket.sort((a, b) => b.score - a.score || a.start - b.start);
+  }
+
+  const selected = new Map<string, CandidateSceneClip>();
+  for (const bucket of byVideo.values()) {
+    const seed = bucket[0];
+    if (seed) {
+      selected.set(candidateKey(seed), seed);
+    }
+  }
+
+  const sortedByScore = [...discoveredClips].sort((a, b) => b.score - a.score || a.start - b.start);
+  const maxClipCount = Math.min(
+    discoveredClips.length,
+    Math.max(3, Math.ceil(targetSeconds / Math.max(0.1, config.preferredClipSeconds)) + 2),
+  );
+
+  for (const candidate of sortedByScore) {
+    if (selected.size >= maxClipCount) {
+      break;
+    }
+    const key = candidateKey(candidate);
+    if (selected.has(key)) {
+      continue;
+    }
+
+    selected.set(key, candidate);
+    const selectedDuration = [...selected.values()].reduce((sum, clip) => sum + clip.duration, 0);
+    if (selectedDuration >= targetSeconds * 1.15 && selected.size >= 2) {
+      break;
+    }
+  }
+
+  const orderedSelected = [...selected.values()];
+  if (style === 'tiktok') {
+    orderedSelected.sort((a, b) => b.score - a.score || a.start - b.start);
+  } else if (style === 'youtube') {
+    orderedSelected.sort((a, b) => a.source_video.localeCompare(b.source_video) || a.start - b.start);
+  } else {
+    orderedSelected.sort((a, b) => a.start - b.start || b.score - a.score);
+  }
+
+  const normalizedClips: CandidateSceneClip[] = [];
+  let remaining = targetSeconds;
+
+  for (let index = 0; index < orderedSelected.length; index += 1) {
+    const clip = orderedSelected[index];
     if (remaining <= 0.01) {
       break;
     }
 
-    const duration = clip.end - clip.start;
-    if (duration <= remaining + 0.1) {
-      normalizedClips.push({ ...clip, order: normalizedClips.length });
-      remaining -= duration;
+    const slotsLeft = orderedSelected.length - index - 1;
+    const minForRest = slotsLeft * config.minClipSeconds;
+    const maxAllowed = Math.max(config.minClipSeconds, remaining - minForRest);
+
+    let take = Math.min(clip.duration, config.maxClipSeconds, maxAllowed);
+    if (take < 0.35) {
       continue;
     }
 
-    const trimmedDuration = Math.max(0.8, remaining);
+    if (take < config.minClipSeconds && clip.duration >= config.minClipSeconds) {
+      take = Math.min(clip.duration, Math.max(config.minClipSeconds, maxAllowed));
+    }
+
+    const trimmedEnd = Math.min(clip.end, clip.start + take);
+    const trimmedDuration = trimmedEnd - clip.start;
+    if (trimmedDuration < 0.35) {
+      continue;
+    }
+
     normalizedClips.push({
       ...clip,
-      end: clip.start + trimmedDuration,
+      end: trimmedEnd,
+      duration: trimmedDuration,
       order: normalizedClips.length,
-      rationale: `${clip.rationale} (trimmed to fit target)`,
+      rationale: trimmedDuration < clip.duration - 0.05 ? `${clip.rationale} (trimmed to fit target)` : clip.rationale,
     });
-    remaining = 0;
+    remaining -= trimmedDuration;
   }
 
   if (normalizedClips.length === 0) {
-    const first = discoveredClips[0];
+    const first = orderedSelected[0] ?? discoveredClips[0];
     normalizedClips.push({
       ...first,
-      end: Math.min(first.end, first.start + Math.max(1, targetDuration)),
+      end: Math.min(first.end, first.start + Math.max(1, Math.min(config.maxClipSeconds, targetSeconds))),
+      duration: Math.min(first.duration, Math.max(1, Math.min(config.maxClipSeconds, targetSeconds))),
       order: 0,
     });
   }
 
-  const transitions = normalizedClips.slice(0, -1).map((_, index) => ({
-    at_clip_index: index,
-    type: index % 2 === 0 ? 'cut' : 'cross_dissolve',
-    duration: index % 2 === 0 ? 0.12 : 0.24,
-  }));
+  const transitions = normalizedClips.slice(0, -1).map((_, index) => {
+    const transition = config.transitionCycle[index % config.transitionCycle.length];
+    return {
+      at_clip_index: index,
+      type: transition.type,
+      duration: transition.duration,
+    };
+  });
 
-  const overlays = Object.values(transcriptions)
-    .flatMap((entry) => entry.transcription.segments)
-    .filter((segment) => segment.text.trim().length > 0)
-    .slice(0, 2)
-    .map((segment, index) => ({
-      text: normalizeSnippet(segment.text, 40),
-      start: Math.max(0, index * 3),
-      end: Math.max(1.5, index * 3 + 2.5),
-      position: 'bottom-center',
-      animation: 'fade',
-    }));
+  const overlays: EditPlan['text_overlays'] = [];
+  let timelineCursor = 0;
+  for (const clip of normalizedClips) {
+    const clipDuration = clip.end - clip.start;
+    if (clipDuration <= 0.35) {
+      timelineCursor += Math.max(0, clipDuration);
+      continue;
+    }
+
+    const transcript = transcriptions[clip.source_video]?.transcription.segments ?? [];
+    const spokenSegment = transcript.find(
+      (segment) =>
+        segment.text.trim().length > 0 &&
+        overlapDuration(clip.start, clip.end, segment.start, segment.end) >= Math.min(0.25, clipDuration * 0.5),
+    );
+
+    if (spokenSegment) {
+      const overlayText = normalizeSnippet(spokenSegment.text, 42);
+      const overlayStart = timelineCursor + Math.min(0.35, clipDuration * 0.22);
+      const overlayDuration = Math.min(2.8, Math.max(1.1, clipDuration * 0.62));
+      const overlayEnd = Math.min(timelineCursor + clipDuration - 0.1, overlayStart + overlayDuration);
+      if (overlayText && overlayEnd > overlayStart + 0.2) {
+        overlays.push({
+          text: overlayText,
+          start: Number(overlayStart.toFixed(2)),
+          end: Number(overlayEnd.toFixed(2)),
+          position: 'bottom-center',
+          animation: config.overlayAnimation,
+        });
+      }
+    }
+
+    timelineCursor += clipDuration;
+    if (overlays.length >= 5) {
+      break;
+    }
+  }
+
+  const finalClips: ClipSegment[] = normalizedClips.map((clip, index) => ({
+    source_video: clip.source_video,
+    start: clip.start,
+    end: clip.end,
+    order: index,
+    rationale: clip.rationale,
+  }));
 
   return {
     style,
     aspect_ratio: aspectRatio,
     target_duration: targetDuration,
-    clips: normalizedClips,
+    clips: finalClips,
     transitions,
     text_overlays: overlays,
-    color_grading: [{ preset: 'vibrant' }],
+    color_grading: [{ preset: style === 'youtube' ? 'cinematic' : 'vibrant' }],
     speed_effects: [],
-    music_suggestion: 'Scene-driven pacing based on cut boundaries and transcript timing',
+    music_suggestion: config.musicSuggestion,
   };
 }
 
@@ -360,6 +555,7 @@ export default function App() {
         setAnalyses(nextAnalyses);
         setAnalysisCompleted(true);
         setEditResult(null);
+        setDraftPlan(null);
         setHistory((previous) =>
           previous.map((item) =>
             item.project_id === projectId ? { ...item, status: 'analyzed', model: selectedModel, updated_at: now } : item,
